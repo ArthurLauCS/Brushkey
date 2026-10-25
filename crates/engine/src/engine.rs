@@ -5,15 +5,15 @@ use crate::{
 };
 use std::collections::HashSet;
 
-/// Fuzzy pinyin pairs; bit i of `Options::fuzzy` enables `FUZZY[i]`. The first
-/// six pair initials, the rest pair finals.
+/// Fuzzy pinyin pairs; bit i of `Options::fuzzy` lets `FUZZY[i]` feed the second
+/// candidate. The first six pair initials, the rest pair finals.
 pub const FUZZY: [(&str, &str); 11] = [
     ("z", "zh"), ("c", "ch"), ("s", "sh"), ("n", "l"), ("f", "h"), ("r", "l"),
     ("an", "ang"), ("en", "eng"), ("in", "ing"), ("ian", "iang"), ("uan", "uang"),
 ];
 
 /// Score penalties (natural log) per syllable typed as its initial only, per
-/// syllable matched through a fuzzy pair, per syllable typed with two adjacent
+/// syllable read through a fuzzy pair, per syllable typed with two adjacent
 /// letters swapped, and for a last syllable still being typed.
 const ABBR: f32 = -3.0;
 const FUZZ: f32 = -1.0;
@@ -71,15 +71,34 @@ struct Syl {
     lo: u16,
     hi: u16,
     pen: f32,
+    /// Read through a fuzzy pair.
+    fuzzy: bool,
     /// Two syllables with the letters at their boundary swapped (nhiao for ni
     /// hao): the second one; lo is the first.
     next: Option<u16>,
 }
 
+/// The first word of the best sentence from a lattice node: entry `e` of table
+/// `ti` up to node `to`, its syllables, and the sentence's score.
+#[derive(Clone)]
+struct Step {
+    score: f32,
+    to: usize,
+    ti: usize,
+    e: usize,
+    syls: Vec<Syl>,
+    /// In the sentences that read a syllable through a fuzzy pair: one has been
+    /// read, so the sentence goes on with the best exact one from `to`.
+    exact: bool,
+}
+
+/// A word of a best sentence: entry `e` of table `ti`, its start node and syllables.
+type Word = (usize, usize, usize, Vec<Syl>);
+
 /// Depth-first walk of table `t` along the lattice from `node`, where entries
 /// lo..hi share their first `d` syllables and are all longer. Calls
-/// `f(end, a, b, pen, ends)` for every key that ends on a lattice node; a..b are
-/// that key's entries and `ends` the node of each of its syllables.
+/// `f(end, a, b, pen, path)` for every key that ends on a lattice node; a..b are
+/// that key's entries and `path` its syllables.
 fn walk(
     t: &Table,
     syl: &[Vec<Syl>],
@@ -88,11 +107,11 @@ fn walk(
     lo: usize,
     hi: usize,
     pen: f32,
-    ends: &mut Vec<usize>,
-    f: &mut impl FnMut(usize, usize, usize, f32, &[usize]),
+    path: &mut Vec<Syl>,
+    f: &mut impl FnMut(usize, usize, usize, f32, &[Syl]),
 ) {
     for s in &syl[node] {
-        ends.push(s.end);
+        path.push(*s);
         let mut a = part(lo, hi, |e| t.key_at(e, d) < s.lo);
         while a < hi {
             let v = t.key_at(a, d);
@@ -111,15 +130,61 @@ fn walk(
             };
             let x = part(a1, b1, |e| t.key_len(e) == n);
             if x > a1 {
-                f(s.end, a1, x, pen + s.pen, ends);
+                f(s.end, a1, x, pen + s.pen, path);
             }
             if x < b1 && !syl[s.end].is_empty() {
-                walk(t, syl, s.end, n, x, b1, pen + s.pen, ends, f);
+                walk(t, syl, s.end, n, x, b1, pen + s.pen, path, f);
             }
             a = b;
         }
-        ends.pop();
+        path.pop();
     }
+}
+
+/// Best sentences from each lattice node to `end`, by dynamic programming from
+/// the back, in one pass: `[0]` reads every syllable as typed, `[1]` at least
+/// one through a fuzzy pair.
+fn best(tables: &[&Table; 2], syl: &[Vec<Syl>], end: usize) -> [Vec<Option<Step>>; 2] {
+    let mut best = [vec![None; end + 1], vec![None; end + 1]];
+    best[0][end] = Some(Step { score: 0.0, to: end, ti: 0, e: 0, syls: vec![], exact: false });
+    let score = |s: &Option<Step>| s.as_ref().map_or(f32::NEG_INFINITY, |s| s.score);
+    for i in (0..end).rev() {
+        for (ti, t) in tables.iter().enumerate() {
+            walk(t, syl, i, 0, 0, t.len(), 0.0, &mut vec![], &mut |j, e, _, pen, path| {
+                let (x, f) = (score(&best[0][j]), score(&best[1][j]));
+                let mut put = |k: usize, rest: f32, exact: bool| {
+                    let s = t.score(e) + pen + rest;
+                    if s > score(&best[k][i]) {
+                        best[k][i] = Some(Step { score: s, to: j, ti, e, syls: path.to_vec(), exact });
+                    }
+                };
+                // A word read through a fuzzy pair goes on with either sentence; others keep theirs.
+                if path.iter().any(|s| s.fuzzy) {
+                    put(1, x.max(f), x >= f);
+                } else {
+                    put(0, x, false);
+                    put(1, f, false);
+                }
+            });
+        }
+    }
+    best
+}
+
+/// The words of the best sentence from node `i` (see `best`), one read through
+/// a fuzzy pair if `fuzzy`.
+fn path(best: &[Vec<Option<Step>>; 2], fuzzy: bool, mut i: usize) -> Vec<Word> {
+    let (mut t, mut words) = (&best[fuzzy as usize], vec![]);
+    while let Some(s) = &t[i]
+        && s.to > i
+    {
+        words.push((s.ti, s.e, i, s.syls.clone()));
+        if s.exact {
+            t = &best[0];
+        }
+        i = s.to;
+    }
+    words
 }
 
 /// Pinyin composition: typed letters, picks so far, and candidates for the rest.
@@ -276,9 +341,10 @@ impl Engine {
         Some(segs.iter().map(|s| &*s.text).collect())
     }
 
-    /// Syllable lattice of `raw`: for each byte offset, the syllables starting there.
-    /// Also returns where the pinyin ends, ignoring trailing separators.
-    fn lattice(&self, raw: &str) -> (Vec<Vec<Syl>>, usize) {
+    /// Syllable lattice of `raw`: for each byte offset, the syllables starting there,
+    /// with those read through the `fuzzy` pairs. Also returns where the pinyin
+    /// ends, ignoring trailing separators.
+    fn lattice(&self, raw: &str, fuzzy: u32) -> (Vec<Vec<Syl>>, usize) {
         let end = raw.trim_end_matches('\'').len();
         let mut out: Vec<Vec<Syl>> = vec![vec![]; raw.len() + 1];
         // whole[i]: the j up to i + 12 where raw[i..j] splits into whole syllables,
@@ -305,34 +371,34 @@ impl Engine {
                     whole[i].push(j);
                     whole[i].extend(more);
                 }
-                let mut add = |p: Option<(u16, u16)>, pen| {
+                let mut add = |p: Option<(u16, u16)>, pen, fuzzy| {
                     if let Some((lo, hi)) = p {
-                        out[i].push(Syl { end: j, lo, hi, pen, next: None })
+                        out[i].push(Syl { end: j, lo, hi, pen, fuzzy, next: None })
                     }
                 };
                 if let Some(id) = id {
-                    add(Some((id, id)), 0.0);
-                    for f in self.fuzzy(s) {
-                        add(Some((f, f)), FUZZ);
+                    add(Some((id, id)), 0.0, false);
+                    for f in self.fuzzy(s, fuzzy) {
+                        add(Some((f, f)), FUZZ, true);
                     }
                 } else {
                     if j == end && !is_initial(s) {
-                        add(self.dict.prefix(s), PART);
+                        add(self.dict.prefix(s), PART, false);
                     }
                     if has_vowel(s) && !whole[i].contains(&j) {
                         for k in 0..s.len() - 1 {
                             let mut t = [0; 8];
                             t[..s.len()].copy_from_slice(s.as_bytes());
                             t.swap(k, k + 1);
-                            add(self.syl(std::str::from_utf8(&t[..s.len()]).unwrap()).map(|id| (id, id)), SWAP);
+                            add(self.syl(std::str::from_utf8(&t[..s.len()]).unwrap()).map(|id| (id, id)), SWAP, false);
                         }
                     }
                 }
                 if is_initial(s) {
-                    add(self.dict.prefix(s), ABBR);
+                    add(self.dict.prefix(s), ABBR, false);
                     for (k, &(a, b)) in FUZZY[..6].iter().enumerate() {
-                        if self.opts.fuzzy >> k & 1 == 1 && (s == a || s == b) {
-                            add(self.dict.prefix(if s == a { b } else { a }), ABBR + FUZZ);
+                        if fuzzy >> k & 1 == 1 && (s == a || s == b) {
+                            add(self.dict.prefix(if s == a { b } else { a }), ABBR + FUZZ, true);
                         }
                     }
                 }
@@ -354,7 +420,7 @@ impl Engine {
                     if let Some(y) = self.syl(second).filter(|_| has_vowel(second))
                         && !whole[i].contains(&j)
                     {
-                        out[i].push(Syl { end: j, lo: x, hi: x, pen: SWAP, next: Some(y) });
+                        out[i].push(Syl { end: j, lo: x, hi: x, pen: SWAP, fuzzy: false, next: Some(y) });
                     }
                 }
             }
@@ -371,9 +437,8 @@ impl Engine {
         })
     }
 
-    /// Other syllables `s` stands for under the enabled fuzzy pairs.
-    fn fuzzy(&self, s: &str) -> Vec<u16> {
-        let m = self.opts.fuzzy;
+    /// Other syllables `s` stands for under the fuzzy pairs `m`.
+    fn fuzzy(&self, s: &str, m: u32) -> Vec<u16> {
         if m == 0 {
             return vec![];
         }
@@ -407,7 +472,8 @@ impl Engine {
 
     /// Finds the candidates for the pinyin after the last pick: the user's picks
     /// for all of it (newest first), the best sentence, then every word the
-    /// pinyin starts with, ranked by the best sentence it begins.
+    /// pinyin starts with, ranked by the best sentence it begins; the best
+    /// reading through fuzzy pairs goes second.
     fn update(&mut self) {
         self.cands.clear();
         self.seps.clear();
@@ -417,42 +483,25 @@ impl Engine {
             return;
         }
         let raw = self.raw[pos..].to_string();
-        let (syl, end) = self.lattice(&raw);
+        let (syl, end) = self.lattice(&raw, self.opts.fuzzy);
+        let fuzzy = |path: &[Syl]| path.iter().any(|s| s.fuzzy);
         self.user.rebuild();
         let user = self.user.table();
         let tables = [&user, &self.dict.words];
-
-        // Best sentence from each lattice node to the end, by dynamic programming
-        // from the back; best[i] = (score, to, table, entry, syllable ends).
-        let mut best: Vec<Option<(f32, usize, usize, usize, Vec<usize>)>> = vec![None; end + 1];
-        best[end] = Some((0.0, end, 0, 0, vec![]));
-        for i in (0..end).rev() {
-            for (ti, t) in tables.iter().enumerate() {
-                walk(t, &syl, i, 0, 0, t.len(), 0.0, &mut vec![], &mut |j, a, _, pen, ends| {
-                    let Some(rest) = best[j].as_ref().map(|b| b.0) else { return };
-                    let s = t.score(a) + pen + rest;
-                    if best[i].as_ref().is_none_or(|b| s > b.0) {
-                        best[i] = Some((s, j, ti, a, ends.to_vec()));
-                    }
-                });
-            }
-        }
-        let mut words = vec![];
-        let mut i = 0;
-        while i < end && let Some((_, j, ti, a, ends)) = &best[i] {
-            words.push((*ti, *a));
-            self.seps.extend(ends);
-            i = *j;
-        }
+        let dp = best(&tables, &syl, end);
+        let words = path(&dp, false, 0);
+        self.seps = words.iter().flat_map(|w| w.3.iter().map(|s| s.end)).collect();
 
         // Words the pinyin starts with, ranked by their score plus the best
         // sentence for the rest: 我 (+是) lands near 我是, ahead of rare words
         // such as 握实. The user's picks for all of it go first, newest first.
         let mut found = vec![];
         for (ti, t) in tables.iter().enumerate() {
-            walk(t, &syl, 0, 0, 0, t.len(), 0.0, &mut vec![], &mut |j, a, b, pen, _| {
-                let rest = best[j].as_ref().map_or(f32::NEG_INFINITY, |b| b.0);
-                found.extend((a..b).map(|e| (j, ti, e, t.score(e) + pen + rest)));
+            walk(t, &syl, 0, 0, 0, t.len(), 0.0, &mut vec![], &mut |j, a, b, pen, path| {
+                if !fuzzy(path) {
+                    let rest = dp[0][j].as_ref().map_or(f32::NEG_INFINITY, |b| b.score);
+                    found.extend((a..b).map(|e| (j, ti, e, t.score(e) + pen + rest)));
+                }
             });
         }
         let mine = |f: &(usize, usize, usize, f32)| f.1 == 0 && f.0 == end;
@@ -463,21 +512,45 @@ impl Engine {
                     false => y.3.total_cmp(&x.3).then(y.0.cmp(&x.0)),
                 })
         });
-        let sentence = (words.len() > 1).then(|| {
-            let word = |&(ti, a): &(usize, usize)| tables[ti].text(a);
-            let text = match self.opts.trad {
-                true => words.iter().map(|w| self.dict.trad(word(w), self.user.pref(word(w))).swap_remove(0)).collect(),
-                false => words.iter().map(word).collect(),
-            };
-            let key = words.iter().flat_map(|&(ti, a)| tables[ti].key(a)).collect();
-            Cand { text, simp: words.iter().map(word).collect(), key, end }
-        });
+        let sentence = (words.len() > 1).then(|| self.join(&tables, &raw, &words));
+        let fuzzy = Some(path(&dp, true, 0)).filter(|w| !w.is_empty()).map(|w| self.join(&tables, &raw, &w));
         self.pending = Pending {
             at: found.iter().take_while(|f| mine(f)).count(),
             found: found.into_iter().map(|f| (f.0, f.1, f.2)).collect(),
             sentence,
+            fuzzy,
             ..Default::default()
         };
+    }
+
+    /// A sentence on `raw` as one candidate. Syllables read through a fuzzy pair
+    /// are keyed as typed, so a pick comes first the next time it is typed that way.
+    fn join(&self, tables: &[&Table; 2], raw: &str, words: &[Word]) -> Cand {
+        let mut c = Cand { text: String::new(), simp: String::new(), key: vec![], end: 0 };
+        for (ti, e, i, syls) in words {
+            let (t, simp) = (tables[*ti], tables[*ti].text(*e));
+            c.text += &self.text(simp);
+            c.simp += simp;
+            let (key, mut a, mut k) = (t.key(*e), *i, 0);
+            for s in syls {
+                let n = 1 + s.next.is_some() as usize;
+                match s.fuzzy {
+                    true => c.key.push(self.syl(raw[a..s.end].trim_start_matches('\'')).unwrap_or(key[k])),
+                    false => c.key.extend(&key[k..k + n]),
+                }
+                (a, k) = (s.end, k + n);
+            }
+            c.end = a;
+        }
+        c
+    }
+
+    /// A word as shown: in Traditional, the user's preferred form.
+    fn text(&self, simp: &str) -> String {
+        match self.opts.trad {
+            true => self.dict.trad(simp, self.user.pref(simp)).swap_remove(0),
+            false => simp.into(),
+        }
     }
 
     /// The first `n` candidates, or all there are if fewer. Candidates are built
@@ -505,18 +578,26 @@ impl Engine {
                     self.cands.push(c);
                 }
             }
+            if !self.cands.is_empty()
+                && let Some(c) = p.fuzzy.take()
+                && p.seen.insert(c.text.clone())
+            {
+                self.cands.insert(1, c);
+            }
         }
         &self.cands[..n.min(self.cands.len())]
     }
 }
 
 /// Candidates not built yet: words from the start of the pinyin as (end, table,
-/// entry) in display order, with the sentence going before `found[at]`.
+/// entry) in display order, with the sentence going before `found[at]` and the
+/// fuzzy reading second.
 #[derive(Default)]
 struct Pending {
     found: Vec<(usize, usize, usize)>,
     at: usize,
     sentence: Option<Cand>,
+    fuzzy: Option<Cand>,
     k: usize,
     seen: HashSet<String>,
 }

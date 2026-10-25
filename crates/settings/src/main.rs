@@ -396,7 +396,7 @@ impl Pen<'_> {
         // right: fuzzy pinyin, memory, version
         let (x0, x1) = (M + COL + 16.0, W - M);
         let mut y = M;
-        self.title(x0, y, tr("模糊音", "Fuzzy pinyin"));
+        self.title(x0, y, tr("模糊音（第 2 个候选）", "Fuzzy pinyin (2nd candidate)"));
         y += TITLE;
         let rows = FUZZY.len().div_ceil(3);
         self.card_h(x0, y, x1, rows as f32 * FUZZY_ROW + 12.0);

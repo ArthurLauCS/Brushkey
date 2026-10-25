@@ -172,8 +172,18 @@ fn traditional() {
 
 #[test]
 fn fuzzy_and_char_of_word() {
-    let mut e = Engine::new(dict(), User::open(None, true), Options { fuzzy: 1, ..Default::default() }); // z = zh
-    assert!(typ(&mut e, "zongguo").contains(&"中国".into()));
+    // The best reading through the enabled pairs goes second; a pick of it is
+    // learned as typed.
+    let p = log("fuzzy");
+    let mut e = Engine::new(dict(), User::open(Some(p.clone()), true), Options { fuzzy: 1 | 1 << 2 | 1 << 8, ..Default::default() }); // z = zh, s = sh, in = ing
+    assert_eq!(typ(&mut e, "zongguo")[1], "中国");
+    assert_eq!(typ(&mut e, "si")[1], "是");
+    assert_eq!(typ(&mut e, "jinglai")[1], "进来");
+    pick(&mut e, "进来");
+    assert_eq!(typ(&mut e, "jinglai")[0], "进来");
+    assert_eq!(typ(&mut eng(None, false), "zongguo")[1], "总");
+    let _ = std::fs::remove_file(&p);
+
     let mut e = eng(None, false);
     typ(&mut e, "wenzhang");
     let i = e.candidates(50).iter().position(|c| c.text == "文章").unwrap();

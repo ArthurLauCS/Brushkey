@@ -24,7 +24,7 @@ Download `Brushkey-Setup-<version>.exe` from [Releases](https://github.com/Arthu
 
 Type a whole sentence in one go: the first candidate is the likeliest sentence, followed by words for its first syllables. Initials work too (`zg` for a two-character word whose syllables start with z and g).
 
-Two adjacent letters typed in swapped order are corrected (`xainzai` reads as `xianzai`), as long as the letters as typed don't spell valid pinyin.
+Two adjacent letters typed in swapped order are corrected (`xainzai` reads as `xianzai`), as long as the letters as typed don't spell valid pinyin. The second candidate is the likeliest reading through fuzzy pinyin (`si` also offers the word for `shi`); settings choose which pairs count.
 
 While typing pinyin:
 
@@ -50,7 +50,7 @@ Right-click the mode button in the taskbar tray, or open **Brushkey Settings** f
 
 - Chinese / English toggle key: Shift, Ctrl or off
 - Candidate window: horizontal or vertical, 3–9 per page, font size, Simplified and Traditional fonts
-- Fuzzy pinyin, 11 pairs (z = zh, n = l, an = ang, …)
+- Fuzzy pinyin for the second candidate, 11 pairs (z = zh, n = l, an = ang, …; 8 on by default)
 - Clear memory
 - Language of the settings window
 
