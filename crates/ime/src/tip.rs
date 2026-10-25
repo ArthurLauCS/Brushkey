@@ -3,7 +3,7 @@
 //! the candidate list to the app (games draw their own) or to our window.
 
 use crate::{
-    ATTR, ELEMENT, NAME, beside_dll, dict, guard,
+    ATTR, ATTR_FOCUS, ELEMENT, NAME, beside_dll, dict, guard,
     ime::{Ime, Key, Mode, Out},
     langbar::Button,
     load_mode, sandboxed, save_mode,
@@ -56,9 +56,12 @@ struct State {
     /// Candidate list element while candidates are up, and its id.
     elem: Option<(ComObject<Element>, u32)>,
     button: Option<ComObject<Button>>,
-    /// The atom that tags composition text with `ATTR`; 0 if TSF gave none.
-    attr: u32,
+    /// The atoms that tag composition text with `ATTRS`; 0 if TSF gave none.
+    attr: [u32; 2],
 }
+
+/// Display attributes: composition text, the word being adjusted.
+const ATTRS: [GUID; 2] = [ATTR, ATTR_FOCUS];
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
@@ -117,17 +120,18 @@ impl Tip_Impl {
 
     /// Applies what a key did: shares a changed mode, then updates the text.
     fn update(&self, ctx: &ITfContext, out: Out) -> Result<()> {
-        let (changed, preedit, id) = {
+        let (changed, preedit, focus, id) = {
             let mut s = self.s.borrow_mut();
             s.ctx = Some(ctx.clone());
             let ime = s.ime.as_ref().unwrap();
             let preedit = if ime.engine.is_composing() { ime.engine.preedit() } else { String::new() };
-            (s.mode != Some(ime.mode), preedit, s.id)
+            let focus = ime.engine.focus().map(|f| [f.start, f.end].map(|b| preedit[..b].encode_utf16().count() as i32));
+            (s.mode != Some(ime.mode), preedit, focus, s.id)
         };
         if changed {
             self.sync(true)?;
         }
-        let es: ITfEditSession = Session { tip: self.to_object(), ctx: ctx.clone(), commit: out.commit, preedit, hint: out.hint }.into();
+        let es: ITfEditSession = Session { tip: self.to_object(), ctx: ctx.clone(), commit: out.commit, preedit, focus, hint: out.hint }.into();
         unsafe { ctx.RequestEditSession(id, &es, TF_ES_ASYNCDONTCARE | TF_ES_READWRITE).map(|_| ()) }
     }
 
@@ -160,31 +164,33 @@ impl Tip_Impl {
     }
 
     /// Runs inside an edit session: commits text, updates the composition, then
-    /// shows the candidates and the mode hint at the text.
-    fn edit(&self, ec: u32, ctx: &ITfContext, commit: &str, preedit: &str, hint: Option<&'static str>) -> Result<()> {
+    /// shows the candidates and the mode hint at the text (adjusting: at the
+    /// focused word, UTF-16 offsets `focus` in the preedit).
+    fn edit(&self, ec: u32, ctx: &ITfContext, commit: &str, preedit: &str, focus: Option<[i32; 2]>, hint: Option<&'static str>) -> Result<()> {
         let (mut comp, attr) = {
             let s = self.s.borrow();
             (s.comp.clone(), s.attr)
         };
         // The underline is cosmetic: an app without the property still gets the text.
-        let underline = |r: &ITfRange, on: bool| unsafe {
+        let underline = |r: &ITfRange, atom: u32| unsafe {
             if let Ok(p) = ctx.GetProperty(&GUID_PROP_ATTRIBUTE) {
-                let _ = if on { p.SetValue(ec, r, &VARIANT::from(attr as i32)) } else { p.Clear(ec, r) };
+                let _ = if atom != 0 { p.SetValue(ec, r, &VARIANT::from(atom as i32)) } else { p.Clear(ec, r) };
             }
         };
+        let mut at = None;
         unsafe {
             if !commit.is_empty() {
                 let r = match comp.take() {
                     Some(c) => {
                         let r = c.GetRange()?;
                         r.SetText(ec, 0, &wide(commit))?;
-                        underline(&r, false);
+                        underline(&r, 0);
                         c.EndComposition(ec)?;
                         r
                     }
                     None => ctx.cast::<ITfInsertAtSelection>()?.InsertTextAtSelection(ec, INSERT_TEXT_AT_SELECTION_FLAGS(0), &wide(commit))?,
                 };
-                caret_to_end(ec, ctx, &r)?;
+                caret(ec, ctx, &r, TF_ANCHOR_END)?;
             }
             if !preedit.is_empty() {
                 let c = match comp.take() {
@@ -203,17 +209,31 @@ impl Tip_Impl {
                 };
                 let r = c.GetRange()?;
                 r.SetText(ec, 0, &wide(preedit))?;
-                if attr != 0 {
-                    underline(&r, true);
-                }
-                caret_to_end(ec, ctx, &r)?;
+                underline(&r, attr[0]);
+                // The caret goes to the end, or to the focused word with its own underline.
+                at = Some(match focus {
+                    Some([a, b]) => {
+                        let f = r.Clone()?;
+                        let mut n = 0;
+                        f.Collapse(ec, TF_ANCHOR_START)?;
+                        f.ShiftEnd(ec, b, &mut n, std::ptr::null())?;
+                        f.ShiftStart(ec, a, &mut n, std::ptr::null())?;
+                        underline(&f, attr[1]);
+                        caret(ec, ctx, &f, TF_ANCHOR_START)?;
+                        f
+                    }
+                    None => {
+                        caret(ec, ctx, &r, TF_ANCHOR_END)?;
+                        r
+                    }
+                });
                 comp = Some(c);
             } else if let Some(c) = comp.take() {
                 c.GetRange()?.SetText(ec, 0, &[])?;
                 c.EndComposition(ec)?;
             }
         }
-        let rect = text_rect(ec, ctx, comp.as_ref());
+        let rect = text_rect(ec, ctx, at.as_ref());
         self.s.borrow_mut().comp = comp;
         self.show(ctx, rect, hint)
     }
@@ -277,11 +297,11 @@ impl Tip_Impl {
     }
 }
 
-/// Moves the caret to the end of `r`.
-unsafe fn caret_to_end(ec: u32, ctx: &ITfContext, r: &ITfRange) -> Result<()> {
+/// Moves the caret to the start or end of `r`.
+unsafe fn caret(ec: u32, ctx: &ITfContext, r: &ITfRange, to: TfAnchor) -> Result<()> {
     unsafe {
         let r = r.Clone()?;
-        r.Collapse(ec, TF_ANCHOR_END)?;
+        r.Collapse(ec, to)?;
         let mut sel = [TF_SELECTION { range: ManuallyDrop::new(Some(r)), style: TF_SELECTIONSTYLE { ase: TF_AE_NONE, fInterimChar: FALSE } }];
         let res = ctx.SetSelection(ec, &sel);
         ManuallyDrop::drop(&mut sel[0].range);
@@ -303,11 +323,11 @@ fn password(ec: u32, ctx: &ITfContext, r: &ITfRange) -> bool {
     scopes().unwrap_or(false)
 }
 
-/// Screen rectangle of the composition, or of the caret when not composing.
-fn text_rect(ec: u32, ctx: &ITfContext, comp: Option<&ITfComposition>) -> Option<RECT> {
+/// Screen rectangle of the text `at`, or of the caret when not composing.
+fn text_rect(ec: u32, ctx: &ITfContext, at: Option<&ITfRange>) -> Option<RECT> {
     let from_tsf = || unsafe {
-        let range = match comp {
-            Some(c) => c.GetRange()?,
+        let range = match at {
+            Some(r) => r.clone(),
             None => {
                 let mut sel = [TF_SELECTION::default()];
                 let mut n = 0;
@@ -340,12 +360,13 @@ struct Session {
     ctx: ITfContext,
     commit: String,
     preedit: String,
+    focus: Option<[i32; 2]>,
     hint: Option<&'static str>,
 }
 
 impl ITfEditSession_Impl for Session_Impl {
     fn DoEditSession(&self, ec: u32) -> Result<()> {
-        guard(|| self.tip.edit(ec, &self.ctx, &self.commit, &self.preedit, self.hint))
+        guard(|| self.tip.edit(ec, &self.ctx, &self.commit, &self.preedit, self.focus, self.hint))
     }
 }
 
@@ -385,7 +406,8 @@ impl ITfTextInputProcessorEx_Impl for Tip_Impl {
             let (mode, settings) = (load_mode(), Settings::load());
             let user = User::open(user_dir().map(|d| d.join("user.log")), !sandboxed());
             let button = Button::new(self.to_object(), mode).into_object();
-            let attr = CoCreateInstance::<_, ITfCategoryMgr>(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER).and_then(|c| c.RegisterGUID(&ATTR)).unwrap_or(0);
+            let cat = CoCreateInstance::<_, ITfCategoryMgr>(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER).ok();
+            let attr = ATTRS.map(|g| cat.as_ref().and_then(|c| c.RegisterGUID(&g).ok()).unwrap_or(0));
             let ime = Some(Ime::new(dict, user, mode, &settings));
             *self.s.borrow_mut() = State { tm: Some(tm.clone()), id, ime, settings, button: Some(button.clone()), attr, ..Default::default() };
             let src: ITfSource = tm.cast()?;
@@ -630,7 +652,10 @@ impl ITfDisplayAttributeProvider_Impl for Tip_Impl {
     }
 
     fn GetDisplayAttributeInfo(&self, guid: *const GUID) -> Result<ITfDisplayAttributeInfo> {
-        if unsafe { *guid } == ATTR { Ok(Attr.into()) } else { Err(E_INVALIDARG.into()) }
+        match ATTRS.iter().position(|g| *g == unsafe { *guid }) {
+            Some(k) => Ok(Attr(k).into()),
+            None => Err(E_INVALIDARG.into()),
+        }
     }
 }
 
@@ -665,13 +690,14 @@ pub fn open_settings() -> Result<()> {
     Ok(())
 }
 
-/// Composition text: dotted underline in the text's color.
+/// `ATTRS[k]`: composition text with a dotted underline in the text's color; the
+/// word being adjusted with a solid one, marked as the clause being converted.
 #[implement(ITfDisplayAttributeInfo)]
-struct Attr;
+struct Attr(usize);
 
 impl ITfDisplayAttributeInfo_Impl for Attr_Impl {
     fn GetGUID(&self) -> Result<GUID> {
-        Ok(ATTR)
+        Ok(ATTRS[self.0])
     }
 
     fn GetDescription(&self) -> Result<BSTR> {
@@ -679,7 +705,8 @@ impl ITfDisplayAttributeInfo_Impl for Attr_Impl {
     }
 
     fn GetAttributeInfo(&self, pda: *mut TF_DISPLAYATTRIBUTE) -> Result<()> {
-        unsafe { *pda = TF_DISPLAYATTRIBUTE { lsStyle: TF_LS_DOT, bAttr: TF_ATTR_INPUT, ..Default::default() } };
+        let (style, attr) = [(TF_LS_DOT, TF_ATTR_INPUT), (TF_LS_SOLID, TF_ATTR_TARGET_CONVERTED)][self.0];
+        unsafe { *pda = TF_DISPLAYATTRIBUTE { lsStyle: style, bAttr: attr, ..Default::default() } };
         Ok(())
     }
 
@@ -692,37 +719,42 @@ impl ITfDisplayAttributeInfo_Impl for Attr_Impl {
     }
 }
 
-/// Lists our one attribute.
+/// Lists our attributes.
 #[implement(IEnumTfDisplayAttributeInfo)]
 #[derive(Default)]
 struct AttrEnum {
-    done: Cell<bool>,
+    next: Cell<usize>,
 }
 
 impl IEnumTfDisplayAttributeInfo_Impl for AttrEnum_Impl {
     fn Clone(&self) -> Result<IEnumTfDisplayAttributeInfo> {
-        Ok(AttrEnum { done: self.done.clone() }.into())
+        Ok(AttrEnum { next: self.next.clone() }.into())
     }
 
     fn Next(&self, count: u32, info: *mut Option<ITfDisplayAttributeInfo>, fetched: *mut u32) -> Result<()> {
-        let n = (count > 0 && !self.done.replace(count > 0)) as u32;
+        let k = self.next.get();
+        let res = self.Skip(count);
+        let n = self.next.get() - k;
         unsafe {
-            if n == 1 {
-                *info = Some(Attr.into());
+            for i in 0..n {
+                info.add(i).write(Some(Attr(k + i).into()));
             }
             if !fetched.is_null() {
-                *fetched = n;
+                *fetched = n as u32;
             }
         }
-        if n == count { Ok(()) } else { Err(S_FALSE.into()) }
+        res
     }
 
     fn Reset(&self) -> Result<()> {
-        self.done.set(false);
+        self.next.set(0);
         Ok(())
     }
 
     fn Skip(&self, count: u32) -> Result<()> {
-        self.Next(count, &mut None, std::ptr::null_mut())
+        let k = self.next.get();
+        let n = (count as usize).min(ATTRS.len() - k);
+        self.next.set(k + n);
+        if n == count as usize { Ok(()) } else { Err(S_FALSE.into()) }
     }
 }

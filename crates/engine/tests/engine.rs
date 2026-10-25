@@ -206,3 +206,56 @@ fn swapped_letters() {
     assert_eq!(typ(&mut e, "xianzai")[0], "先在");
     let _ = std::fs::remove_file(&p);
 }
+
+#[test]
+fn adjust() {
+    let p = log("adjust");
+    let mut e = eng(Some(p.clone()), false);
+    let focus = |e: &Engine| e.preedit()[e.focus().unwrap()].to_string();
+    typ(&mut e, "jintiantianqizhenhao");
+    e.left();
+    assert_eq!((e.preedit().as_str(), focus(&e).as_str()), ("今天天气真好", "真好"));
+    assert_eq!(e.candidates(1)[0].text, "真好", "the word shown comes first");
+    // A pick replaces the word and moves on; the words after it re-form.
+    assert_eq!(pick(&mut e, "阵"), None);
+    assert_eq!((e.preedit().as_str(), focus(&e).as_str()), ("今天天气阵好", "好"));
+    e.left();
+    e.left();
+    e.left();
+    e.left();
+    assert_eq!(focus(&e), "今天天气");
+    // A shorter word keeps the later pick, with the best words between.
+    pick(&mut e, "今天");
+    assert_eq!((e.preedit().as_str(), focus(&e).as_str()), ("今天天气阵好", "天气"));
+    // Every pick is learned, and the sentence as one word.
+    assert_eq!(e.commit_all(), "今天天气阵好");
+    assert_eq!(typ(&mut e, "zhen")[0], "阵");
+    assert_eq!(typ(&mut e, "jintiantianqizhenhao")[0], "今天天气阵好");
+    let _ = std::fs::remove_file(&p);
+
+    let mut e = eng(None, false);
+    typ(&mut e, "nihaoshijie");
+    e.left();
+    e.right();
+    assert!(!e.adjusting(), "→ past the last word goes back to typing");
+    e.left();
+    assert_eq!(pick(&mut e, "时节").as_deref(), Some("你好时节"), "a pick reaching the end commits");
+    typ(&mut e, "nihaoshijie");
+    e.left();
+    e.left();
+    pick(&mut e, "拟好");
+    e.leave();
+    assert_eq!(e.preedit(), "拟好shi'jie");
+    "shijie".chars().for_each(|_| e.pop());
+    e.pop();
+    assert_eq!(e.preedit(), "ni'hao", "Backspace undoes the pick");
+
+    // Backspace past a pick also lets go of the words kept before it.
+    typ(&mut e, "jintiantianqizhenhao");
+    e.left();
+    pick(&mut e, "阵");
+    e.leave();
+    assert_eq!(e.preedit(), "今天天气阵hao");
+    (0..4).for_each(|_| e.pop());
+    assert_eq!(e.preedit(), "jin'tian'tian'qi'zhen");
+}

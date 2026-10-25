@@ -3,7 +3,7 @@ use crate::{
     table::{Table, part},
     user::User,
 };
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::Range};
 
 /// Fuzzy pinyin pairs; bit i of `Options::fuzzy` lets `FUZZY[i]` feed the second
 /// candidate. The first six pair initials, the rest pair finals.
@@ -50,18 +50,22 @@ pub struct Cand {
     pub text: String,
     simp: String,
     key: Vec<u16>,
-    /// Bytes of the remaining pinyin this candidate consumes.
+    /// Pinyin byte offset where this candidate ends.
     end: usize,
 }
 
-/// A candidate already picked in the current composition.
+/// A word of the composition: picked, kept as shown before a later pick, or
+/// (in `Engine::rest`) what Space commits for the pinyin after them.
 struct Seg {
     text: String,
     simp: String,
-    /// Empty when the pick is not to be learned.
+    /// Empty when the word cannot be learned.
     key: Vec<u16>,
-    /// Pinyin bytes consumed up to and including this pick.
+    /// The pinyin bytes it reads.
+    start: usize,
     end: usize,
+    /// Picked by the user, so learned on its own.
+    pick: bool,
 }
 
 /// One syllable of the lattice: the pinyin up to `end` reads as syllable ids lo..=hi.
@@ -187,13 +191,17 @@ fn path(best: &[Vec<Option<Step>>; 2], fuzzy: bool, mut i: usize) -> Vec<Word> {
     words
 }
 
-/// Pinyin composition: typed letters, picks so far, and candidates for the rest.
+/// Pinyin composition: typed letters, words fixed so far, and candidates for the rest.
 pub struct Engine {
     dict: &'static Dict,
     pub user: User,
     opts: Options,
     raw: String,
     segs: Vec<Seg>,
+    /// What Space commits for the pinyin after `segs`.
+    rest: Vec<Seg>,
+    /// Adjusting the sentence (← →): the focused word, counting `segs`, then `rest`.
+    focus: Option<usize>,
     cands: Vec<Cand>,
     pending: Pending,
     /// Syllable boundaries of the best sentence for the remaining pinyin, for the preedit.
@@ -203,8 +211,8 @@ pub struct Engine {
 impl Engine {
     pub fn new(dict: &'static Dict, mut user: User, opts: Options) -> Engine {
         user.refresh(dict);
-        let (raw, segs, cands, pending, seps) = Default::default();
-        Engine { dict, user, opts, raw, segs, cands, pending, seps }
+        let (raw, segs, rest, focus, cands, pending, seps) = Default::default();
+        Engine { dict, user, opts, raw, segs, rest, focus, cands, pending, seps }
     }
 
     pub fn set_options(&mut self, opts: Options) {
@@ -220,21 +228,28 @@ impl Engine {
         !self.raw.is_empty()
     }
 
-    /// Adds a typed letter (a-z, v for ü) or a syllable separator `'`.
+    /// Adds a typed letter (a-z, v for ü) or a syllable separator `'` at the end,
+    /// back to typing.
     pub fn push(&mut self, c: char) {
         if self.raw.is_empty() {
             self.user.refresh(self.dict);
         }
+        self.focus = None;
         self.raw.push(c);
         self.update();
     }
 
-    /// Backspace: removes the last letter, or, with no pinyin left, undoes the last pick.
+    /// Backspace: removes the last letter, or, with no pinyin left, undoes the
+    /// last pick, with the words kept as shown before it; back to typing.
     pub fn pop(&mut self) {
+        self.focus = None;
         if self.raw.len() > self.pos() {
             self.raw.pop();
         } else {
             self.segs.pop();
+            while self.segs.last().is_some_and(|s| !s.pick) {
+                self.segs.pop();
+            }
         }
         self.update();
     }
@@ -242,15 +257,65 @@ impl Engine {
     pub fn clear(&mut self) {
         self.raw.clear();
         self.segs.clear();
+        self.focus = None;
         self.update();
     }
 
-    /// What the composition shows: picks so far, then the rest of the pinyin
-    /// split into syllables ("你好shi'jie").
+    pub fn adjusting(&self) -> bool {
+        self.focus.is_some()
+    }
+
+    /// ←: starts adjusting at the last word, or focuses the previous one.
+    pub fn left(&mut self) {
+        let n = self.segs.len() + self.rest.len();
+        self.focus = self.focus.map_or(n.checked_sub(1), |k| Some(k.saturating_sub(1)));
+        self.update();
+    }
+
+    /// →: focuses the next word; past the last one, back to typing.
+    pub fn right(&mut self) {
+        self.focus = self.focus.map(|k| k + 1).filter(|&k| k < self.segs.len() + self.rest.len());
+        self.update();
+    }
+
+    /// Esc while adjusting: back to typing, keeping the words picked.
+    pub fn leave(&mut self) {
+        self.focus = None;
+        self.update();
+    }
+
+    /// Space or Enter while adjusting: commits the sentence as shown.
+    pub fn commit_all(&mut self) -> String {
+        self.leave();
+        self.select(0).unwrap_or_else(|| self.commit_raw())
+    }
+
+    /// While adjusting, the byte range of the focused word in `preedit`.
+    pub fn focus(&self) -> Option<Range<usize>> {
+        let k = self.focus?;
+        let a: usize = self.words().take(k).map(|w| w.text.len()).sum();
+        Some(a..a + self.word(k).text.len())
+    }
+
+    fn words(&self) -> impl Iterator<Item = &Seg> {
+        self.segs.iter().chain(&self.rest)
+    }
+
+    fn word(&self, k: usize) -> &Seg {
+        self.words().nth(k).unwrap()
+    }
+
+    /// What the composition shows: while typing, the words fixed so far, then the
+    /// rest of the pinyin split into syllables ("你好shi'jie"); while adjusting,
+    /// the sentence.
     pub fn preedit(&self) -> String {
+        let mut s: String = self.segs.iter().map(|x| &*x.text).collect();
+        if self.focus.is_some() {
+            let end = self.words().last().map_or(0, |w| w.end);
+            return self.rest.iter().fold(s, |s, w| s + &w.text) + &self.raw[end..];
+        }
         let rest = &self.raw[self.pos()..];
         let end = rest.trim_end_matches('\'').len();
-        let mut s: String = self.segs.iter().map(|x| &*x.text).collect();
         let mut last = 0;
         for &e in &self.seps {
             s += &rest[last..e];
@@ -292,10 +357,14 @@ impl Engine {
         self.segs.last().map_or(0, |s| s.end)
     }
 
+    /// Picks candidate i for the pinyin after the words fixed so far or, while
+    /// adjusting, in place of the focused word. Commits once the words fixed
+    /// cover all of the pinyin.
     fn pick(&mut self, i: usize, char_of: Option<bool>) -> Option<String> {
         self.candidates(i + 1);
         let c = self.cands.get(i)?;
-        let mut seg = Seg { text: c.text.clone(), simp: c.simp.clone(), key: c.key.clone(), end: self.pos() + c.end };
+        let start = self.focus.map_or(self.pos(), |k| self.word(k).start);
+        let mut seg = Seg { text: c.text.clone(), simp: c.simp.clone(), key: c.key.clone(), start, end: c.end, pick: true };
         if let Some(last) = char_of {
             let t: Vec<char> = seg.text.chars().collect();
             let s: Vec<char> = seg.simp.chars().collect();
@@ -309,13 +378,31 @@ impl Engine {
                 seg.key.clear();
             }
         }
-        let done = seg.end >= self.raw.trim_end_matches('\'').len();
-        self.segs.push(seg);
-        if !done {
+        match self.focus {
+            None => self.segs.push(seg),
+            Some(k) => {
+                // The words before the focus stay as shown; the picks after it that
+                // the new word doesn't cover stay, with the best words between them.
+                let mut words: Vec<Seg> = self.segs.drain(..).chain(self.rest.drain(..)).collect();
+                let later: Vec<Seg> = words.split_off(k + 1).into_iter().filter(|w| w.pick && w.start >= seg.end).collect();
+                words.truncate(k);
+                words.push(seg);
+                for w in later {
+                    let end = words[words.len() - 1].end;
+                    if w.start > end {
+                        words.extend(self.fill(end, w.start));
+                    }
+                    words.push(w);
+                }
+                self.segs = words;
+                self.focus = Some(k + 1);
+            }
+        }
+        if self.pos() < self.raw.trim_end_matches('\'').len() {
             self.update();
             return None;
         }
-        // Learn every pick, and several picks together as one new word.
+        // Learn every pick, and the words together as one new word.
         let segs = std::mem::take(&mut self.segs);
         let mut lines = String::new();
         let mut learn = |key: &[u16], simp: &str, text: &str| {
@@ -324,11 +411,10 @@ impl Engine {
                 lines += &format!("=\t{simp}\t{text}\n");
             }
         };
-        let learnable: Vec<&Seg> = segs.iter().filter(|s| !s.key.is_empty()).collect();
-        for s in &learnable {
+        for s in segs.iter().filter(|s| s.pick && !s.key.is_empty()) {
             learn(&s.key, &s.simp, &s.text);
         }
-        if segs.len() > 1 && learnable.len() == segs.len() {
+        if segs.len() > 1 && segs.iter().all(|s| !s.key.is_empty()) {
             let key: Vec<u16> = segs.iter().flat_map(|s| s.key.iter().copied()).collect();
             let simp: String = segs.iter().map(|s| &*s.simp).collect();
             let text: String = segs.iter().map(|s| &*s.text).collect();
@@ -470,41 +556,62 @@ impl Engine {
         out
     }
 
-    /// Finds the candidates for the pinyin after the last pick: the user's picks
-    /// for all of it (newest first), the best sentence, then every word the
-    /// pinyin starts with, ranked by the best sentence it begins; the best
-    /// reading through fuzzy pairs goes second.
+    /// Finds the candidates for the pinyin from the focused word or, while typing,
+    /// after the words fixed so far: the word shown there (adjusting) or the
+    /// user's picks for all of it (newest first) and the best sentence (typing),
+    /// then every word the pinyin starts with, ranked by the best sentence it
+    /// begins; the best reading through fuzzy pairs goes second. Also finds `rest`.
     fn update(&mut self) {
         self.cands.clear();
         self.seps.clear();
+        self.rest.clear();
         self.pending = Pending::default();
         let pos = self.pos();
         if self.raw.len() <= pos {
+            self.focus = None;
             return;
         }
-        let raw = self.raw[pos..].to_string();
+        // The lattice starts at the focused word when it is fixed, else after the words fixed.
+        let base = self.focus.filter(|&k| k < self.segs.len()).map_or(pos, |k| self.segs[k].start);
+        let raw = self.raw[base..].to_string();
         let (syl, end) = self.lattice(&raw, self.opts.fuzzy);
         let fuzzy = |path: &[Syl]| path.iter().any(|s| s.fuzzy);
         self.user.rebuild();
         let user = self.user.table();
         let tables = [&user, &self.dict.words];
         let dp = best(&tables, &syl, end);
-        let words = path(&dp, false, 0);
-        self.seps = words.iter().flat_map(|w| w.3.iter().map(|s| s.end)).collect();
+
+        // What Space commits after the words fixed: the user's newest pick for all
+        // of it, else the best sentence.
+        let p = pos - base;
+        let words = path(&dp, false, p);
+        self.seps = words.iter().flat_map(|w| w.3.iter().map(|s| s.end - p)).collect();
+        let mut newest = None;
+        walk(&user, &syl, p, 0, 0, user.len(), 0.0, &mut vec![], &mut |j, a, b, _, path| {
+            if j == end && !fuzzy(path) {
+                newest = (a..b).chain(newest).max_by_key(|&e| self.user.seq(e));
+            }
+        });
+        self.rest = match newest {
+            Some(e) => vec![Seg { text: self.text(user.text(e)), simp: user.text(e).into(), key: user.key(e), start: pos, end: base + end, pick: false }],
+            None => words.iter().map(|w| self.seg(&tables, w, base)).collect(),
+        };
+        self.focus = self.focus.filter(|&k| k < self.segs.len() + self.rest.len());
+        let from = self.focus.map_or(pos, |k| self.word(k).start) - base;
 
         // Words the pinyin starts with, ranked by their score plus the best
         // sentence for the rest: 我 (+是) lands near 我是, ahead of rare words
         // such as 握实. The user's picks for all of it go first, newest first.
         let mut found = vec![];
         for (ti, t) in tables.iter().enumerate() {
-            walk(t, &syl, 0, 0, 0, t.len(), 0.0, &mut vec![], &mut |j, a, b, pen, path| {
+            walk(t, &syl, from, 0, 0, t.len(), 0.0, &mut vec![], &mut |j, a, b, pen, path| {
                 if !fuzzy(path) {
                     let rest = dp[0][j].as_ref().map_or(f32::NEG_INFINITY, |b| b.score);
-                    found.extend((a..b).map(|e| (j, ti, e, t.score(e) + pen + rest)));
+                    found.extend((a..b).map(|e| (base + j, ti, e, t.score(e) + pen + rest)));
                 }
             });
         }
-        let mine = |f: &(usize, usize, usize, f32)| f.1 == 0 && f.0 == end;
+        let mine = |f: &(usize, usize, usize, f32)| f.1 == 0 && f.0 == base + end;
         found.sort_by(|x, y| {
             mine(y).cmp(&mine(x))
                 .then_with(|| match mine(x) {
@@ -512,20 +619,35 @@ impl Engine {
                     false => y.3.total_cmp(&x.3).then(y.0.cmp(&x.0)),
                 })
         });
-        let sentence = (words.len() > 1).then(|| self.join(&tables, &raw, &words));
-        let fuzzy = Some(path(&dp, true, 0)).filter(|w| !w.is_empty()).map(|w| self.join(&tables, &raw, &w));
-        self.pending = Pending {
-            at: found.iter().take_while(|f| mine(f)).count(),
-            found: found.into_iter().map(|f| (f.0, f.1, f.2)).collect(),
-            sentence,
-            fuzzy,
-            ..Default::default()
+        let (at, sentence) = match self.focus {
+            Some(k) => {
+                let w = self.word(k);
+                (0, Some(Cand { text: w.text.clone(), simp: w.simp.clone(), key: w.key.clone(), end: w.end }))
+            }
+            None => (found.iter().take_while(|f| mine(f)).count(), (words.len() > 1).then(|| self.join(&tables, &raw, base, &words))),
         };
+        let fuzzy = Some(path(&dp, true, from)).filter(|w| !w.is_empty()).map(|w| self.join(&tables, &raw, base, &w));
+        self.pending = Pending { at, found: found.into_iter().map(|f| (f.0, f.1, f.2)).collect(), sentence, fuzzy, ..Default::default() };
     }
 
-    /// A sentence on `raw` as one candidate. Syllables read through a fuzzy pair
-    /// are keyed as typed, so a pick comes first the next time it is typed that way.
-    fn join(&self, tables: &[&Table; 2], raw: &str, words: &[Word]) -> Cand {
+    /// The best words for the pinyin a..b, kept as shown.
+    fn fill(&self, a: usize, b: usize) -> Vec<Seg> {
+        let (syl, end) = self.lattice(&self.raw[a..b], 0);
+        let user = self.user.table();
+        let tables = [&user, &self.dict.words];
+        path(&best(&tables, &syl, end), false, 0).iter().map(|w| self.seg(&tables, w, a)).collect()
+    }
+
+    /// Word `w` of a sentence on the pinyin from `base`, not picked.
+    fn seg(&self, tables: &[&Table; 2], (ti, e, i, syls): &Word, base: usize) -> Seg {
+        let (t, simp) = (tables[*ti], tables[*ti].text(*e));
+        Seg { text: self.text(simp), simp: simp.into(), key: t.key(*e), start: base + i, end: base + syls[syls.len() - 1].end, pick: false }
+    }
+
+    /// A sentence on `raw` (the pinyin from `base`) as one candidate. Syllables
+    /// read through a fuzzy pair are keyed as typed, so a pick comes first the
+    /// next time it is typed that way.
+    fn join(&self, tables: &[&Table; 2], raw: &str, base: usize, words: &[Word]) -> Cand {
         let mut c = Cand { text: String::new(), simp: String::new(), key: vec![], end: 0 };
         for (ti, e, i, syls) in words {
             let (t, simp) = (tables[*ti], tables[*ti].text(*e));
@@ -540,7 +662,7 @@ impl Engine {
                 }
                 (a, k) = (s.end, k + n);
             }
-            c.end = a;
+            c.end = base + a;
         }
         c
     }
@@ -590,8 +712,8 @@ impl Engine {
 }
 
 /// Candidates not built yet: words from the start of the pinyin as (end, table,
-/// entry) in display order, with the sentence going before `found[at]` and the
-/// fuzzy reading second.
+/// entry) in display order, with the sentence (adjusting: the word shown) going
+/// before `found[at]` and the fuzzy reading second.
 #[derive(Default)]
 struct Pending {
     found: Vec<(usize, usize, usize)>,

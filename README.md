@@ -33,6 +33,7 @@ While typing pinyin:
 - **[** / **]** type the first / last character of a candidate.
 - **Shift+letter** types the first candidate, then the capital letter. Punctuation likewise types the first candidate, then the punctuation.
 - **Ctrl+Shift+1–9** forgets a learned word.
+- **←** / **→** go back over the sentence word by word: the candidates are for the word with the solid underline, and a pick replaces it and moves to the next word. **Space** or **Enter** types the sentence; **Esc** goes back to typing, a second **Esc** clears; letters and **Backspace** carry on at the end.
 - Switching to another window clears what you were typing; nothing is entered.
 
 Modes apply to every app at once and are kept after a restart:

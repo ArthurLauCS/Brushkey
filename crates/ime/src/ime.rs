@@ -11,6 +11,8 @@ const VK_ESCAPE: u16 = 0x1B;
 const VK_SPACE: u16 = 0x20;
 const VK_PRIOR: u16 = 0x21;
 const VK_NEXT: u16 = 0x22;
+const VK_LEFT: u16 = 0x25;
+const VK_RIGHT: u16 = 0x27;
 
 /// Keys that map to Chinese punctuation in Chinese mode.
 const PUNCT: &str = ",.;:?!\\()<>[]^_$~`\"'";
@@ -47,7 +49,13 @@ enum Act {
     Forget(usize),
     /// Next page when true.
     Page(bool),
-    /// Commit the first candidate, then this character.
+    /// ← → adjust the sentence word by word; → when true.
+    Move(bool),
+    /// Esc while adjusting: back to typing.
+    Leave,
+    /// Space or Enter while adjusting: commit the sentence as shown.
+    All,
+    /// Commit the first candidate (adjusting: the sentence), then this character.
     Then(char),
     /// Not composing: output this character (Chinese punctuation or full width).
     Emit(char),
@@ -187,11 +195,16 @@ impl Ime {
         let c = ch(k.vk, if letter { k.shift != k.caps } else { k.shift });
         let pinyin = self.mode.chinese && letter && !k.shift && !k.caps;
         if comp {
+            let adjusting = self.engine.adjusting();
             return Some(match (k.vk, c) {
                 (VK_BACK, _) => Pop,
+                (VK_ESCAPE, _) if adjusting => Leave,
                 (VK_ESCAPE, _) => Clear,
+                (VK_RETURN | VK_SPACE, _) if adjusting => All,
                 (VK_RETURN, _) => Raw,
                 (VK_SPACE, _) => Pick(0),
+                (VK_LEFT, _) => Move(false),
+                (VK_RIGHT, _) => Move(true),
                 (VK_PRIOR, _) | (_, Some('-' | ',')) => Page(false),
                 (VK_NEXT, _) | (_, Some('=' | '.')) => Page(true),
                 (_, Some('[')) => Char(false),
@@ -200,8 +213,8 @@ impl Ime {
                 (_, Some('0')) => Nothing,
                 (_, Some(c)) if pinyin || c == '\'' => Push(c),
                 (_, Some(c)) => Then(c),
-                // Tab, arrows, Home, End, Insert, Delete
-                (VK_TAB | 0x23..=0x28 | 0x2D | 0x2E, None) => Nothing,
+                // Tab, End, Home, ↑ ↓, Insert, Delete
+                (VK_TAB | 0x23 | 0x24 | 0x26 | 0x28 | 0x2D | 0x2E, None) => Nothing,
                 _ => return None,
             });
         }
@@ -231,8 +244,12 @@ impl Ime {
             Forget(i) if i < per && has(e, at + i) => e.forget(at + i),
             Page(true) if has(e, at + per) => self.page += 1,
             Page(false) => self.page = self.page.saturating_sub(1),
+            Move(false) => e.left(),
+            Move(true) => e.right(),
+            Leave => e.leave(),
+            All => out.commit = e.commit_all(),
             Then(c) => {
-                let first = if has(e, at) { e.select(at) } else { None };
+                let first = if e.adjusting() { Some(e.commit_all()) } else if has(e, at) { e.select(at) } else { None };
                 out.commit = first.unwrap_or_else(|| e.commit_raw());
                 out.commit += &self.text(c);
             }
@@ -474,5 +491,35 @@ mod tests {
         assert_eq!(page(&mut m), first[..5]);
         assert_eq!(typ(&mut m, "6="), "");
         assert_eq!(page(&mut m)[0], first[5]);
+    }
+
+    #[test]
+    fn adjust() {
+        let mut m = ime(true);
+        let [left, right, esc] = [VK_LEFT, VK_RIGHT, VK_ESCAPE].map(|vk| Key { vk, ..Default::default() });
+        typ(&mut m, "nihaoshijie");
+        press(&mut m, left);
+        press(&mut m, left);
+        let i = page(&mut m).iter().position(|c| c == "拟好").unwrap();
+        assert_eq!(press(&mut m, key(char::from_digit(i as u32 + 1, 10).unwrap())), "");
+        assert_eq!(m.engine.preedit(), "拟好世界");
+        // Esc goes back to typing, a second Esc clears
+        press(&mut m, esc);
+        assert!(!m.engine.adjusting() && m.engine.is_composing());
+        press(&mut m, esc);
+        assert!(!m.engine.is_composing());
+        // Space and Enter commit the sentence as shown, punctuation then itself
+        for (k, want) in [(' ', "你好世界"), ('\n', "你好世界"), ('?', "你好世界？")] {
+            typ(&mut m, "nihaoshijie");
+            press(&mut m, left);
+            assert_eq!(press(&mut m, key(k)), want);
+        }
+        // → past the last word goes back to typing; outside a composition arrows pass through
+        typ(&mut m, "ni");
+        press(&mut m, left);
+        press(&mut m, right);
+        assert!(!m.engine.adjusting());
+        press(&mut m, esc);
+        assert!(!m.test(left));
     }
 }
