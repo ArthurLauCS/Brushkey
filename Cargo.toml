@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/engine", "crates/ime"]
+members = ["crates/engine", "crates/ime", "crates/settings"]
 resolver = "3"
 
 [profile.release]
