@@ -24,6 +24,8 @@ Download `Brushkey-Setup-<version>.exe` from [Releases](https://github.com/Arthu
 
 Type a whole sentence in one go: the first candidate is the likeliest sentence, followed by words for its first syllables. Initials work too (`zg` for a two-character word whose syllables start with z and g).
 
+Two adjacent letters typed in swapped order are corrected (`xainzai` reads as `xianzai`), as long as the letters as typed don't spell valid pinyin.
+
 While typing pinyin:
 
 - **Space** or **1–9** picks a candidate; **Enter** types the letters as they are; **Esc** clears.

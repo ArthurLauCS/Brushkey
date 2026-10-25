@@ -179,3 +179,20 @@ fn fuzzy_and_char_of_word() {
     let i = e.candidates(50).iter().position(|c| c.text == "文章").unwrap();
     assert_eq!(e.select_char(i, true).as_deref(), Some("章"));
 }
+
+#[test]
+fn swapped_letters() {
+    let p = log("swap");
+    let mut e = eng(Some(p.clone()), false);
+    for (py, want) in [("zhogn", "中"), ("xainzai", "现在"), ("womne", "我们"), ("nhiao", "你好"), ("woxainzaizaijia", "我现在在家")] {
+        assert_eq!(typ(&mut e, py)[0], want, "{py}");
+    }
+    // Letters that split into whole syllables are read as typed.
+    assert!(!typ(&mut e, "gou").contains(&"国".into()));
+    // The composition shows the letters as typed; a pick is learned as corrected.
+    typ(&mut e, "xainzai");
+    assert_eq!(e.preedit(), "xain'zai");
+    pick(&mut e, "先在");
+    assert_eq!(typ(&mut e, "xianzai")[0], "先在");
+    let _ = std::fs::remove_file(&p);
+}

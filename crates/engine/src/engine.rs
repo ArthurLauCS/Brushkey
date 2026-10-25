@@ -13,13 +13,28 @@ pub const FUZZY: [(&str, &str); 11] = [
 ];
 
 /// Score penalties (natural log) per syllable typed as its initial only, per
-/// syllable matched through a fuzzy pair, and for a last syllable still being typed.
+/// syllable matched through a fuzzy pair, per syllable typed with two adjacent
+/// letters swapped, and for a last syllable still being typed.
 const ABBR: f32 = -3.0;
 const FUZZ: f32 = -1.0;
+const SWAP: f32 = -3.0;
 const PART: f32 = -1.0;
 
 fn is_initial(s: &str) -> bool {
     matches!(s, "zh" | "ch" | "sh") || s.len() == 1 && "bpmfdtnlgkhjqxrzcsyw".contains(s)
+}
+
+/// `a` then `b` (pinyin letters) in `buf`, without allocating.
+fn cat<'a>(buf: &'a mut [u8; 8], a: &[u8], b: &[u8]) -> &'a str {
+    let n = a.len() + b.len();
+    buf[..a.len()].copy_from_slice(a);
+    buf[a.len()..n].copy_from_slice(b);
+    std::str::from_utf8(&buf[..n]).unwrap()
+}
+
+/// Whole syllables have a vowel; m, n, ng, hm, hng (interjections) don't.
+fn has_vowel(s: &str) -> bool {
+    s.bytes().any(|b| b"aeiouv".contains(&b))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -56,6 +71,9 @@ struct Syl {
     lo: u16,
     hi: u16,
     pen: f32,
+    /// Two syllables with the letters at their boundary swapped (nhiao for ni
+    /// hao): the second one; lo is the first.
+    next: Option<u16>,
 }
 
 /// Depth-first walk of table `t` along the lattice from `node`, where entries
@@ -82,12 +100,21 @@ fn walk(
                 break;
             }
             let b = part(a, hi, |e| t.key_at(e, d) <= v);
-            let x = part(a, b, |e| t.key_len(e) == d + 1);
-            if x > a {
-                f(s.end, a, x, pen + s.pen, ends);
+            // a1..b1: the entries that also have the second of a pair at d + 1
+            let (a1, b1, n) = match s.next {
+                None => (a, b, d + 1),
+                Some(w) => {
+                    let x = part(a, b, |e| t.key_len(e) == d + 1);
+                    let a1 = part(x, b, |e| t.key_at(e, d + 1) < w);
+                    (a1, part(a1, b, |e| t.key_at(e, d + 1) <= w), d + 2)
+                }
+            };
+            let x = part(a1, b1, |e| t.key_len(e) == n);
+            if x > a1 {
+                f(s.end, a1, x, pen + s.pen, ends);
             }
-            if x < b && !syl[s.end].is_empty() {
-                walk(t, syl, s.end, d + 1, x, b, pen + s.pen, ends, f);
+            if x < b1 && !syl[s.end].is_empty() {
+                walk(t, syl, s.end, n, x, b1, pen + s.pen, ends, f);
             }
             a = b;
         }
@@ -254,8 +281,14 @@ impl Engine {
     fn lattice(&self, raw: &str) -> (Vec<Vec<Syl>>, usize) {
         let end = raw.trim_end_matches('\'').len();
         let mut out: Vec<Vec<Syl>> = vec![vec![]; raw.len() + 1];
+        // whole[i]: the j up to i + 12 where raw[i..j] splits into whole syllables,
+        // the last one possibly unfinished at the end (nia for nian). Swapped
+        // letters are read only where the letters don't split so (gou stays gou,
+        // not guo).
+        let mut whole: Vec<Vec<usize>> = vec![vec![]; raw.len() + 1];
+        let b = raw.as_bytes();
         for i in (0..raw.len()).rev() {
-            if raw.as_bytes()[i] == b'\'' {
+            if b[i] == b'\'' {
                 out[i] = out[i + 1].clone();
                 continue;
             }
@@ -266,18 +299,34 @@ impl Engine {
                     "nue" => "nve",
                     s => s,
                 };
+                let id = self.dict.syl(s);
+                if has_vowel(s) && (id.is_some() || j == end && self.dict.prefix(s).is_some()) {
+                    let more: Vec<usize> = whole[j].iter().copied().filter(|&k| k <= i + 12).collect();
+                    whole[i].push(j);
+                    whole[i].extend(more);
+                }
                 let mut add = |p: Option<(u16, u16)>, pen| {
                     if let Some((lo, hi)) = p {
-                        out[i].push(Syl { end: j, lo, hi, pen })
+                        out[i].push(Syl { end: j, lo, hi, pen, next: None })
                     }
                 };
-                if let Some(id) = self.dict.syl(s) {
+                if let Some(id) = id {
                     add(Some((id, id)), 0.0);
                     for f in self.fuzzy(s) {
                         add(Some((f, f)), FUZZ);
                     }
-                } else if j == end && !is_initial(s) {
-                    add(self.dict.prefix(s), PART);
+                } else {
+                    if j == end && !is_initial(s) {
+                        add(self.dict.prefix(s), PART);
+                    }
+                    if has_vowel(s) && !whole[i].contains(&j) {
+                        for k in 0..s.len() - 1 {
+                            let mut t = [0; 8];
+                            t[..s.len()].copy_from_slice(s.as_bytes());
+                            t.swap(k, k + 1);
+                            add(self.syl(std::str::from_utf8(&t[..s.len()]).unwrap()).map(|id| (id, id)), SWAP);
+                        }
+                    }
                 }
                 if is_initial(s) {
                     add(self.dict.prefix(s), ABBR);
@@ -288,8 +337,38 @@ impl Engine {
                     }
                 }
             }
+            // Two syllables with the letters at their boundary swapped: b[k] starts
+            // the second, b[k + 1] ends the first (nhiao for ni hao).
+            for k in i..(i + 6).min(raw.len() - 1) {
+                if b[k] == b'\'' || b[k + 1] == b'\'' {
+                    break;
+                }
+                let mut t = [0; 8];
+                let first = cat(&mut t, &b[i..k], &b[k + 1..k + 2]);
+                let Some(x) = self.syl(first).filter(|_| has_vowel(first)) else { continue };
+                for j in k + 2..=(k + 7).min(raw.len()) {
+                    if b[j - 1] == b'\'' {
+                        break;
+                    }
+                    let second = cat(&mut t, &b[k..k + 1], &b[k + 2..j]);
+                    if let Some(y) = self.syl(second).filter(|_| has_vowel(second))
+                        && !whole[i].contains(&j)
+                    {
+                        out[i].push(Syl { end: j, lo: x, hi: x, pen: SWAP, next: Some(y) });
+                    }
+                }
+            }
         }
         (out, end)
+    }
+
+    /// The id of a whole syllable as typed (lue and nue spell lve and nve).
+    fn syl(&self, s: &str) -> Option<u16> {
+        self.dict.syl(match s {
+            "lue" => "lve",
+            "nue" => "nve",
+            s => s,
+        })
     }
 
     /// Other syllables `s` stands for under the enabled fuzzy pairs.
