@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "engine"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "ime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "engine",
  "windows",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "settings"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "engine",
  "ime",
