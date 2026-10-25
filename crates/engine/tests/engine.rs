@@ -172,10 +172,90 @@ fn traditional() {
 
 #[test]
 fn fuzzy_and_char_of_word() {
-    let mut e = Engine::new(dict(), User::open(None, true), Options { fuzzy: 1, ..Default::default() }); // z = zh
-    assert!(typ(&mut e, "zongguo").contains(&"中国".into()));
+    // The best reading through the enabled pairs goes second; a pick of it is
+    // learned as typed.
+    let p = log("fuzzy");
+    let mut e = Engine::new(dict(), User::open(Some(p.clone()), true), Options { fuzzy: 1 | 1 << 2 | 1 << 8, ..Default::default() }); // z = zh, s = sh, in = ing
+    assert_eq!(typ(&mut e, "zongguo")[1], "中国");
+    assert_eq!(typ(&mut e, "si")[1], "是");
+    assert_eq!(typ(&mut e, "jinglai")[1], "进来");
+    pick(&mut e, "进来");
+    assert_eq!(typ(&mut e, "jinglai")[0], "进来");
+    assert_eq!(typ(&mut eng(None, false), "zongguo")[1], "总");
+    let _ = std::fs::remove_file(&p);
+
     let mut e = eng(None, false);
     typ(&mut e, "wenzhang");
     let i = e.candidates(50).iter().position(|c| c.text == "文章").unwrap();
     assert_eq!(e.select_char(i, true).as_deref(), Some("章"));
+}
+
+#[test]
+fn swapped_letters() {
+    let p = log("swap");
+    let mut e = eng(Some(p.clone()), false);
+    for (py, want) in [("zhogn", "中"), ("xainzai", "现在"), ("womne", "我们"), ("nhiao", "你好"), ("woxainzaizaijia", "我现在在家")] {
+        assert_eq!(typ(&mut e, py)[0], want, "{py}");
+    }
+    // Letters that split into whole syllables are read as typed.
+    assert!(!typ(&mut e, "gou").contains(&"国".into()));
+    // The composition shows the letters as typed; a pick is learned as corrected.
+    typ(&mut e, "xainzai");
+    assert_eq!(e.preedit(), "xain'zai");
+    pick(&mut e, "先在");
+    assert_eq!(typ(&mut e, "xianzai")[0], "先在");
+    let _ = std::fs::remove_file(&p);
+}
+
+#[test]
+fn adjust() {
+    let p = log("adjust");
+    let mut e = eng(Some(p.clone()), false);
+    let focus = |e: &Engine| e.preedit()[e.focus().unwrap()].to_string();
+    typ(&mut e, "jintiantianqizhenhao");
+    e.left();
+    assert_eq!((e.preedit().as_str(), focus(&e).as_str()), ("今天天气真好", "真好"));
+    assert_eq!(e.candidates(1)[0].text, "真好", "the word shown comes first");
+    // A pick replaces the word and moves on; the words after it re-form.
+    assert_eq!(pick(&mut e, "阵"), None);
+    assert_eq!((e.preedit().as_str(), focus(&e).as_str()), ("今天天气阵好", "好"));
+    e.left();
+    e.left();
+    e.left();
+    e.left();
+    assert_eq!(focus(&e), "今天天气");
+    // A shorter word keeps the later pick, with the best words between.
+    pick(&mut e, "今天");
+    assert_eq!((e.preedit().as_str(), focus(&e).as_str()), ("今天天气阵好", "天气"));
+    // Every pick is learned, and the sentence as one word.
+    assert_eq!(e.commit_all(), "今天天气阵好");
+    assert_eq!(typ(&mut e, "zhen")[0], "阵");
+    assert_eq!(typ(&mut e, "jintiantianqizhenhao")[0], "今天天气阵好");
+    let _ = std::fs::remove_file(&p);
+
+    let mut e = eng(None, false);
+    typ(&mut e, "nihaoshijie");
+    e.left();
+    e.right();
+    assert!(!e.adjusting(), "→ past the last word goes back to typing");
+    e.left();
+    assert_eq!(pick(&mut e, "时节").as_deref(), Some("你好时节"), "a pick reaching the end commits");
+    typ(&mut e, "nihaoshijie");
+    e.left();
+    e.left();
+    pick(&mut e, "拟好");
+    e.leave();
+    assert_eq!(e.preedit(), "拟好shi'jie");
+    "shijie".chars().for_each(|_| e.pop());
+    e.pop();
+    assert_eq!(e.preedit(), "ni'hao", "Backspace undoes the pick");
+
+    // Backspace past a pick also lets go of the words kept before it.
+    typ(&mut e, "jintiantianqizhenhao");
+    e.left();
+    pick(&mut e, "阵");
+    e.leave();
+    assert_eq!(e.preedit(), "今天天气阵hao");
+    (0..4).for_each(|_| e.pop());
+    assert_eq!(e.preedit(), "jin'tian'tian'qi'zhen");
 }

@@ -44,6 +44,8 @@ pub const PROFILE: GUID = GUID::from_u128(0x4f552bca_fa84_4dfa_a856_bbffd6a440ed
 pub const ELEMENT: GUID = GUID::from_u128(0xfd13002e_6001_47f6_a5dc_42abb0079638);
 /// The look of the composition text (dotted underline); apps draw it.
 pub const ATTR: GUID = GUID::from_u128(0x79940892_96fa_4304_8db9_931377fb4f5f);
+/// The word being adjusted (← →): solid underline.
+pub const ATTR_FOCUS: GUID = GUID::from_u128(0x92778008_68b3_434c_b465_66d32c24f860);
 pub const NAME: &str = "Brushkey";
 pub const DESC: &str = "Brushkey 拼音";
 

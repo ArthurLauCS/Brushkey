@@ -24,6 +24,8 @@ Download `Brushkey-Setup-<version>.exe` from [Releases](https://github.com/Arthu
 
 Type a whole sentence in one go: the first candidate is the likeliest sentence, followed by words for its first syllables. Initials work too (`zg` for a two-character word whose syllables start with z and g).
 
+Two adjacent letters typed in swapped order are corrected (`xainzai` reads as `xianzai`), as long as the letters as typed don't spell valid pinyin. The second candidate is the likeliest reading through fuzzy pinyin (`si` also offers the word for `shi`); settings choose which pairs count.
+
 While typing pinyin:
 
 - **Space** or **1–9** picks a candidate; **Enter** types the letters as they are; **Esc** clears.
@@ -31,6 +33,7 @@ While typing pinyin:
 - **[** / **]** type the first / last character of a candidate.
 - **Shift+letter** types the first candidate, then the capital letter. Punctuation likewise types the first candidate, then the punctuation.
 - **Ctrl+Shift+1–9** forgets a learned word.
+- **←** / **→** go back over the sentence word by word: the candidates are for the word with the solid underline, and a pick replaces it and moves to the next word. **Space** or **Enter** types the sentence; **Esc** goes back to typing, a second **Esc** clears; letters and **Backspace** carry on at the end.
 - Switching to another window clears what you were typing; nothing is entered.
 
 Modes apply to every app at once and are kept after a restart:
@@ -48,7 +51,7 @@ Right-click the mode button in the taskbar tray, or open **Brushkey Settings** f
 
 - Chinese / English toggle key: Shift, Ctrl or off
 - Candidate window: horizontal or vertical, 3–9 per page, font size, Simplified and Traditional fonts
-- Fuzzy pinyin, 11 pairs (z = zh, n = l, an = ang, …)
+- Fuzzy pinyin for the second candidate, 11 pairs (z = zh, n = l, an = ang, …; 8 on by default)
 - Clear memory
 - Language of the settings window
 

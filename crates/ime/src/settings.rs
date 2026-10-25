@@ -23,7 +23,8 @@ pub struct Settings {
     pub size: u32,
     pub font: String,
     pub font_trad: String,
-    /// Bit i enables `engine::FUZZY[i]`.
+    /// Bit i lets `engine::FUZZY[i]` feed the second candidate; by default the
+    /// nasal pairs and z/zh, c/ch, s/sh.
     pub fuzzy: u32,
     /// Language of the settings app; None follows Windows.
     pub english: Option<bool>,
@@ -38,7 +39,7 @@ impl Default for Settings {
             size: 18,
             font: "Microsoft YaHei UI".into(),
             font_trad: "Microsoft JhengHei UI".into(),
-            fuzzy: 0,
+            fuzzy: 0b111_1100_0111,
             english: None,
         }
     }
@@ -57,7 +58,7 @@ impl Settings {
                 "size" => s.size = n.map_or(s.size, |n| n.clamp(12, 36)),
                 "font" if !v.is_empty() => s.font = v.into(),
                 "font_trad" if !v.is_empty() => s.font_trad = v.into(),
-                "fuzzy" => s.fuzzy = n.unwrap_or(0),
+                "fuzzy_pairs" => s.fuzzy = n.unwrap_or(s.fuzzy),
                 "lang" => s.english = match v { "en" => Some(true), "zh" => Some(false), _ => None },
                 _ => {}
             }
@@ -87,7 +88,7 @@ impl fmt::Display for Settings {
         let lang = match self.english { Some(true) => "en", Some(false) => "zh", None => "" };
         writeln!(f, "toggle={}\nvertical={}", self.toggle.name(), self.vertical as u8)?;
         writeln!(f, "page={}\nsize={}\nfont={}\nfont_trad={}", self.page, self.size, self.font, self.font_trad)?;
-        writeln!(f, "fuzzy={}\nlang={lang}", self.fuzzy)
+        writeln!(f, "fuzzy_pairs={}\nlang={lang}", self.fuzzy)
     }
 }
 
@@ -100,7 +101,8 @@ mod tests {
         let s = Settings { toggle: Toggle::Ctrl, vertical: true, page: 5, size: 24, font: "KaiTi".into(), font_trad: "PMingLiU".into(), fuzzy: 0b101, english: Some(true) };
         assert_eq!(Settings::parse(&s.to_string()), s);
         assert_eq!(Settings::parse(""), Settings::default());
-        let t = Settings::parse("page=0\nsize=99\ntoggle=x\nfont=\nfuzzy=a");
-        assert_eq!((t.page, t.size, t.toggle, t.font, t.fuzzy), (3, 36, Toggle::Shift, Settings::default().font, 0));
+        let t = Settings::parse("page=0\nsize=99\ntoggle=x\nfont=\nfuzzy_pairs=a");
+        let d = Settings::default();
+        assert_eq!((t.page, t.size, t.toggle, t.font, t.fuzzy), (3, 36, Toggle::Shift, d.font, d.fuzzy));
     }
 }
