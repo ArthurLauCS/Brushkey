@@ -1,0 +1,4 @@
+# Link the VC runtime statically and the Universal CRT (part of Windows 10+) dynamically, so the
+# DLL and the settings app run on machines without the Visual C++ Redistributable.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/NODEFAULTLIB:libucrt.lib", "-C", "link-arg=/DEFAULTLIB:ucrt.lib"]

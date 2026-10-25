@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- App icon (40 px and up): a vermilion speech bubble with a white 中, drawn as a box and a bar so it needs no font -->
+  <defs>
+    <linearGradient id="g" gradientUnits="userSpaceOnUse" x1="40" y1="16" x2="216" y2="248">
+      <stop offset="0" stop-color="#FF7B7B"/>
+      <stop offset="0.5" stop-color="#E5383B"/>
+      <stop offset="1" stop-color="#A8141E"/>
+    </linearGradient>
+  </defs>
+  <path d="M70 20 H186 A54 54 0 0 1 240 74 V142 A54 54 0 0 1 186 196 H118 L52 240 L62 194 A54 54 0 0 1 16 142 V74 A54 54 0 0 1 70 20 Z" fill="url(#g)"/>
+  <rect x="80" y="78" width="96" height="60" rx="6" fill="none" stroke="#FFFFFF" stroke-width="18" stroke-linejoin="round"/>
+  <rect x="118" y="50" width="20" height="116" rx="4" fill="#FFFFFF"/>
+</svg>
