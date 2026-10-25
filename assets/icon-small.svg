@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <!-- Small icon (16-32 px): the bubble in one flat color and a 中 on the 16 px pixel grid -->
+  <path d="M4 0.5 H12 A3.5 3.5 0 0 1 15.5 4 V8.5 A3.5 3.5 0 0 1 12 12 H7.5 L3 15.5 L3.6 11.9 A3.5 3.5 0 0 1 0.5 8.5 V4 A3.5 3.5 0 0 1 4 0.5 Z" fill="#D92B3A"/>
+  <g fill="#FFFFFF" shape-rendering="crispEdges">
+    <rect x="4" y="4" width="8" height="1"/>
+    <rect x="4" y="7" width="8" height="1"/>
+    <rect x="4" y="4" width="1" height="4"/>
+    <rect x="11" y="4" width="1" height="4"/>
+    <rect x="7" y="2" width="2" height="9"/>
+  </g>
+</svg>

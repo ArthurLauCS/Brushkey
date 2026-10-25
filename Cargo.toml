@@ -1,0 +1,11 @@
+[workspace]
+members = ["crates/engine", "crates/ime", "crates/settings"]
+resolver = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+# Tests compile the dictionary from its source text, which takes seconds unoptimized.
+[profile.test]
+opt-level = 2
