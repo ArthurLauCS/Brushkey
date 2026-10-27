@@ -2,6 +2,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
+> **Archived.** Brushkey is no longer maintained. For a pinyin input method with Traditional Chinese output, see [Qingjian](https://github.com/qingjian-team/qingjian).
+
 A pinyin input method for Windows that types Simplified or Traditional (Taiwan) Chinese, learns your words from a single pick, and works in fullscreen games. The keys work like Microsoft Pinyin, so it can replace it as is.
 
 - **Simplified or Traditional with Ctrl+Shift+F.** The pinyin stays the same. Traditional uses Taiwan character forms and offers Taiwan vocabulary first, ahead of the character-by-character conversion.

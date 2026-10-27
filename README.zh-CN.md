@@ -2,6 +2,8 @@
 
 [English](README.md) | 简体中文
 
+> **已归档。** Brushkey 不再维护。需要能输出繁体的拼音输入法，可以改用[青简](https://github.com/qingjian-team/qingjian)。
+
 Windows 拼音输入法：打简体或繁体（台湾）中文，选一次就记住，全屏游戏里也能用。按键和微软拼音一样，可以直接替换它。
 
 - **Ctrl+Shift+F 切换简繁。** 拼音不变。繁体用台湾字形，台湾用词排在逐字转换前面（打 ruanjian 先出“軟體”，再出“軟件”）。
